@@ -255,15 +255,14 @@ if "result" in st.session_state:
 
     st.subheader("✅ 전체 결과")
 
-    # 보기용(콤마) 표시
     amount_view = f"{grand_amount:,.0f}" if float(grand_amount).is_integer() else f"{grand_amount:,}"
+    shipping_view = f"{grand_shipping_calc:,}"
 
-    # 4칸으로 구성해서, "인원×3,500" 옆(오른쪽)에 복사용 입력칸 배치
     m1, m2, m3, m4 = st.columns([1, 1, 1, 1.3])
 
     m1.metric("최종 상품별 총 주문금액 총합", f"{amount_view} 원")
     m2.metric("배송비≠0 중복제거 인원수", f"{grand_unique_count:,} 명")
-    m3.metric("인원×3,500 합계", f"{grand_shipping_calc:,} 원")
+    m3.metric("인원×3,500 합계", f"{shipping_view} 원")
 
     with m4:
         st.caption("📋 엑셀 복사용 (클릭 → Ctrl+C)")
@@ -271,6 +270,11 @@ if "result" in st.session_state:
             "최종 상품별 총 주문금액 총합 (표시용 / 콤마)",
             value=amount_view,
             key="copy_total_amount_fmt_only",
+        )
+        st.text_input(
+            "인원×3,500원 합계 (표시용 / 콤마)",
+            value=shipping_view,
+            key="copy_shipping_fmt_only",
         )
 
     st.subheader("파일별 상세")
