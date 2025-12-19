@@ -180,6 +180,43 @@ def compute_from_sheets(sheets: Dict[str, pd.DataFrame]) -> Tuple[float, Set[str
 
 
 # ----------------------------
+# Formatting helpers (display)
+# ----------------------------
+def _fmt_commas(x) -> str:
+    if x is None:
+        return ""
+    try:
+        if pd.isna(x):
+            return ""
+    except Exception:
+        pass
+
+    try:
+        v = float(x)
+    except Exception:
+        return str(x)
+
+    # integer-like
+    if abs(v - round(v)) < 1e-9:
+        return f"{int(round(v)):,}"
+
+    # keep decimals (no rounding intent; just trim trailing zeros)
+    s = f"{v:,.10f}"
+    s = s.rstrip("0").rstrip(".")
+    return s
+
+
+def fmt_won(x) -> str:
+    s = _fmt_commas(x)
+    return f"{s} 원" if s != "" else ""
+
+
+def fmt_person(x) -> str:
+    s = _fmt_commas(x)
+    return f"{s} 명" if s != "" else ""
+
+
+# ----------------------------
 # Streamlit UI
 # ----------------------------
 st.set_page_config(page_title="매출 합계 계산기", layout="wide")
@@ -201,7 +238,9 @@ if calc_btn:
     else:
         per_file_rows = []
         grand_amount = 0.0
-        grand_keys_union: Set[str] = set()
+
+        # ✅ 변경: 전체 인원수는 "파일별(각 파일 내부 중복 제거) 인원수"를 합산
+        grand_unique_count_sum = 0
 
         progress = st.progress(0)
 
@@ -210,7 +249,7 @@ if calc_btn:
                 sheets = read_excel_sheets(f.getvalue())
                 amount_sum, keyset = compute_from_sheets(sheets)
 
-                unique_count = len(keyset)
+                unique_count = len(keyset)  # 파일 내부(시트 포함) 중복 제거
                 shipping_calc = unique_count * 3500
 
                 per_file_rows.append({
@@ -221,7 +260,7 @@ if calc_btn:
                 })
 
                 grand_amount += amount_sum
-                grand_keys_union.update(keyset)
+                grand_unique_count_sum += unique_count  # ✅ 파일별 합산
 
             except Exception as e:
                 per_file_rows.append({
@@ -234,15 +273,13 @@ if calc_btn:
 
             progress.progress(i / len(uploaded_files))
 
-        grand_unique_count = len(grand_keys_union)
-        grand_shipping_calc = grand_unique_count * 3500
-
+        grand_shipping_calc = grand_unique_count_sum * 3500
         summary_df = pd.DataFrame(per_file_rows)
 
         st.session_state["result"] = {
             "summary_df": summary_df,
             "grand_amount": grand_amount,
-            "grand_unique_count": grand_unique_count,
+            "grand_unique_count_sum": grand_unique_count_sum,
             "grand_shipping_calc": grand_shipping_calc,
         }
 
@@ -250,18 +287,19 @@ if "result" in st.session_state:
     res = st.session_state["result"]
     summary_df = res["summary_df"]
     grand_amount = res["grand_amount"]
-    grand_unique_count = res["grand_unique_count"]
+    grand_unique_count_sum = res["grand_unique_count_sum"]
     grand_shipping_calc = res["grand_shipping_calc"]
 
     st.subheader("✅ 전체 결과")
 
-    amount_view = f"{grand_amount:,.0f}" if float(grand_amount).is_integer() else f"{grand_amount:,}"
-    shipping_view = f"{grand_shipping_calc:,}"
+    amount_view = _fmt_commas(grand_amount)
+    shipping_view = _fmt_commas(grand_shipping_calc)
 
     m1, m2, m3, m4 = st.columns([1, 1, 1, 1.3])
 
     m1.metric("최종 상품별 총 주문금액 총합", f"{amount_view} 원")
-    m2.metric("배송비≠0 중복제거 인원수", f"{grand_unique_count:,} 명")
+    # ✅ 라벨에 '파일별 합산' 의미 반영
+    m2.metric("배송비≠0 인원수(파일별 합산)", f"{_fmt_commas(grand_unique_count_sum)} 명")
     m3.metric("인원×3,500 합계", f"{shipping_view} 원")
 
     with m4:
@@ -278,4 +316,14 @@ if "result" in st.session_state:
         )
 
     st.subheader("파일별 상세")
-    st.dataframe(summary_df, use_container_width=True)
+
+    # ✅ 변경: 파일별 상세 표에서 금액을 통화로 표시
+    display_df = summary_df.copy()
+    if "최종 상품별 총 주문금액 합계" in display_df.columns:
+        display_df["최종 상품별 총 주문금액 합계"] = display_df["최종 상품별 총 주문금액 합계"].apply(fmt_won)
+    if "인원×3,500 합계" in display_df.columns:
+        display_df["인원×3,500 합계"] = display_df["인원×3,500 합계"].apply(fmt_won)
+    if "배송비≠0 (중복제거 인원수)" in display_df.columns:
+        display_df["배송비≠0 (중복제거 인원수)"] = display_df["배송비≠0 (중복제거 인원수)"].apply(fmt_person)
+
+    st.dataframe(display_df, use_container_width=True)
