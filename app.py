@@ -18,7 +18,7 @@ except Exception:
 
 
 def _is_zip_xlsx(file_bytes: bytes) -> bool:
-    # normal xlsx starts with PK.. (zip)
+    # Normal xlsx starts with PK.. (zip)
     return file_bytes[:4] == b"PK\x03\x04"
 
 
@@ -89,8 +89,8 @@ def find_col(cols: List[str], candidates: List[str]) -> Optional[str]:
 
 def detect_header_row(df: pd.DataFrame, max_scan: int = 30) -> int:
     """
-    엑셀에 안내문 등이 위에 있을 수 있어서
-    앞쪽 몇 줄 스캔 후 '구매자명/수취인명'이 포함된 줄을 헤더로 판단.
+    엑셀 상단에 안내문/요약 등이 섞여 있을 수 있어
+    앞쪽 몇 줄 스캔 후 '구매자명/수취인명'이 함께 존재하는 줄을 헤더로 판단.
     """
     must_have = {_norm_no_space("구매자명"), _norm_no_space("수취인명")}
 
@@ -173,6 +173,7 @@ def compute_from_sheets(sheets: Dict[str, pd.DataFrame]) -> Tuple[float, Set[str
             keys = (buyer + "||" + recip + "||" + addr)
             keys = keys[nonzero_mask].dropna()
 
+            # 빈 키 제거
             keys = keys[keys.str.replace("||", "", regex=False).str.strip() != ""]
             nonzero_people_keys.update(keys.tolist())
 
@@ -200,7 +201,7 @@ def _fmt_commas(x) -> str:
     if abs(v - round(v)) < 1e-9:
         return f"{int(round(v)):,}"
 
-    # keep decimals (no rounding intent; just trim trailing zeros)
+    # keep decimals (trim trailing zeros)
     s = f"{v:,.10f}"
     s = s.rstrip("0").rstrip(".")
     return s
@@ -239,7 +240,7 @@ if calc_btn:
         per_file_rows = []
         grand_amount = 0.0
 
-        # ✅ 변경: 전체 인원수는 "파일별(각 파일 내부 중복 제거) 인원수"를 합산
+        # ✅ 전체 결과의 인원수 = "파일별(각 파일 내부 중복 제거) 인원수"를 합산
         grand_unique_count_sum = 0
 
         progress = st.progress(0)
@@ -252,24 +253,28 @@ if calc_btn:
                 unique_count = len(keyset)  # 파일 내부(시트 포함) 중복 제거
                 shipping_calc = unique_count * 3500
 
-                per_file_rows.append({
-                    "파일명": f.name,
-                    "최종 상품별 총 주문금액 합계": amount_sum,
-                    "배송비≠0 (중복제거 인원수)": unique_count,
-                    "인원×3,500 합계": shipping_calc,
-                })
+                per_file_rows.append(
+                    {
+                        "파일명": f.name,
+                        "최종 상품별 총 주문금액 합계": amount_sum,
+                        "배송비≠0 (중복제거 인원수)": unique_count,
+                        "인원×3,500 합계": shipping_calc,
+                    }
+                )
 
                 grand_amount += amount_sum
                 grand_unique_count_sum += unique_count  # ✅ 파일별 합산
 
             except Exception as e:
-                per_file_rows.append({
-                    "파일명": f.name,
-                    "최종 상품별 총 주문금액 합계": None,
-                    "배송비≠0 (중복제거 인원수)": None,
-                    "인원×3,500 합계": None,
-                    "오류": str(e),
-                })
+                per_file_rows.append(
+                    {
+                        "파일명": f.name,
+                        "최종 상품별 총 주문금액 합계": None,
+                        "배송비≠0 (중복제거 인원수)": None,
+                        "인원×3,500 합계": None,
+                        "오류": str(e),
+                    }
+                )
 
             progress.progress(i / len(uploaded_files))
 
@@ -295,14 +300,10 @@ if "result" in st.session_state:
     amount_view = _fmt_commas(grand_amount)
     shipping_view = _fmt_commas(grand_shipping_calc)
 
-    m1, m2, m3, m4 = st.columns([1, 1, 1, 1.3])
+    # ✅ “📋 엑셀 복사용”을 맨 왼쪽으로 배치
+    c_copy, c1, c2, c3 = st.columns([1.3, 1, 1, 1])
 
-    m1.metric("최종 상품별 총 주문금액 총합", f"{amount_view} 원")
-    # ✅ 라벨에 '파일별 합산' 의미 반영
-    m2.metric("배송비≠0 인원수(파일별 합산)", f"{_fmt_commas(grand_unique_count_sum)} 명")
-    m3.metric("인원×3,500 합계", f"{shipping_view} 원")
-
-    with m4:
+    with c_copy:
         st.caption("📋 엑셀 복사용 (클릭 → Ctrl+C)")
         st.text_input(
             "최종 상품별 총 주문금액 총합 (표시용 / 콤마)",
@@ -315,14 +316,21 @@ if "result" in st.session_state:
             key="copy_shipping_fmt_only",
         )
 
+    c1.metric("최종 상품별 총 주문금액 총합", f"{amount_view} 원")
+    c2.metric("배송비≠0 인원수(파일별 합산)", f"{_fmt_commas(grand_unique_count_sum)} 명")
+    c3.metric("인원×3,500 합계", f"{shipping_view} 원")
+
     st.subheader("파일별 상세")
 
-    # ✅ 변경: 파일별 상세 표에서 금액을 통화로 표시
+    # ✅ 파일별 상세에서 숫자를 통화로 표시
     display_df = summary_df.copy()
+
     if "최종 상품별 총 주문금액 합계" in display_df.columns:
         display_df["최종 상품별 총 주문금액 합계"] = display_df["최종 상품별 총 주문금액 합계"].apply(fmt_won)
+
     if "인원×3,500 합계" in display_df.columns:
         display_df["인원×3,500 합계"] = display_df["인원×3,500 합계"].apply(fmt_won)
+
     if "배송비≠0 (중복제거 인원수)" in display_df.columns:
         display_df["배송비≠0 (중복제거 인원수)"] = display_df["배송비≠0 (중복제거 인원수)"].apply(fmt_person)
 
