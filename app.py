@@ -300,6 +300,14 @@ if "result" in st.session_state:
     amount_view = _fmt_commas(grand_amount)
     shipping_view = _fmt_commas(grand_shipping_calc)
 
+    # ✅ 핵심 수정:
+    # text_input은 key가 있으면 이전 입력값을 유지할 수 있어서 metric과 달라질 수 있음.
+    # 위젯 생성 전에 session_state를 최신 값으로 덮어써서 항상 동일하게 맞춤.
+    if st.session_state.get("copy_total_amount_fmt_only") != amount_view:
+        st.session_state["copy_total_amount_fmt_only"] = amount_view
+    if st.session_state.get("copy_shipping_fmt_only") != shipping_view:
+        st.session_state["copy_shipping_fmt_only"] = shipping_view
+
     # ✅ “📋 엑셀 복사용”을 맨 왼쪽으로 배치
     c_copy, c1, c2, c3 = st.columns([1.3, 1, 1, 1])
 
