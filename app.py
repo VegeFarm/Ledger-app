@@ -7,10 +7,6 @@ import streamlit as st
 
 PASSWORD = "0000"
 
-
-# ----------------------------
-# Optional dependency (for password-protected Excel)
-# ----------------------------
 try:
     import msoffcrypto  # pip install msoffcrypto-tool
 except Exception:
@@ -18,16 +14,10 @@ except Exception:
 
 
 def _is_zip_xlsx(file_bytes: bytes) -> bool:
-    # normal xlsx starts with PK.. (zip)
     return file_bytes[:4] == b"PK\x03\x04"
 
 
 def decrypt_excel_bytes(file_bytes: bytes, password: str = PASSWORD) -> io.BytesIO:
-    """
-    Returns a BytesIO that can be read by pandas/openpyxl.
-    - If file is normal xlsx(zip), returns as-is.
-    - If file is encrypted (OLE), decrypts using msoffcrypto.
-    """
     if _is_zip_xlsx(file_bytes):
         return io.BytesIO(file_bytes)
 
@@ -45,7 +35,6 @@ def decrypt_excel_bytes(file_bytes: bytes, password: str = PASSWORD) -> io.Bytes
 
 
 def to_number(series: pd.Series) -> pd.Series:
-    # 숫자/문자 섞여 있어도 안전하게 숫자로 변환 (콤마, 원, 공백 등 제거)
     return pd.to_numeric(
         series.astype(str).str.replace(r"[^\d\.-]", "", regex=True),
         errors="coerce",
@@ -66,19 +55,16 @@ def _norm_no_space(x: str) -> str:
 
 
 def find_col(cols: List[str], candidates: List[str]) -> Optional[str]:
-    # 1) exact match
     for c in candidates:
         if c in cols:
             return c
 
-    # 2) normalized match (remove spaces/newlines)
     cols_norm = {_norm_no_space(c): c for c in cols}
     for cand in candidates:
         n = _norm_no_space(cand)
         if n in cols_norm:
             return cols_norm[n]
 
-    # 3) substring match
     for cand in candidates:
         for col in cols:
             if str(cand) and str(cand) in str(col):
@@ -88,19 +74,13 @@ def find_col(cols: List[str], candidates: List[str]) -> Optional[str]:
 
 
 def detect_header_row(df: pd.DataFrame, max_scan: int = 30) -> int:
-    """
-    엑셀에 안내문 등이 위에 있을 수 있어서
-    앞쪽 몇 줄 스캔 후 '구매자명/수취인명'이 포함된 줄을 헤더로 판단.
-    """
     must_have = {_norm_no_space("구매자명"), _norm_no_space("수취인명")}
-
     scan_n = min(max_scan, len(df))
     for r in range(scan_n):
         row_vals = df.iloc[r].astype(str).tolist()
         row_norm_set = set(_norm_no_space(v) for v in row_vals if str(v).strip() != "")
         if must_have.issubset(row_norm_set):
             return r
-
     return 0
 
 
@@ -116,7 +96,6 @@ def read_excel_sheets(file_bytes: bytes) -> Dict[str, pd.DataFrame]:
         header_row = detect_header_row(df, max_scan=30)
         header = df.iloc[header_row].astype(str).str.strip().tolist()
 
-        # make header unique (avoid duplicate col names)
         seen = {}
         new_cols = []
         for h in header:
@@ -135,16 +114,16 @@ def read_excel_sheets(file_bytes: bytes) -> Dict[str, pd.DataFrame]:
     return sheets
 
 
-def compute_from_sheets(sheets: Dict[str, pd.DataFrame]) -> Tuple[float, Set[str]]:
-    """
-    Returns:
-      (sum_of_final_order_amount, set_of_unique_keys_with_nonzero_shipping)
-    """
+def compute_from_sheets(
+    sheets: Dict[str, pd.DataFrame],
+    amount_mode: str = "rows",  # "rows" or "order_first"
+) -> Tuple[float, Set[str]]:
     AMOUNT_CANDS = ["최종 상품별 총 주문금액"]
     SHIP_CANDS = ["배송비 합계"]
     BUYER_CANDS = ["구매자명"]
     RECIP_CANDS = ["수취인명"]
     ADDR_CANDS = ["통합배송지", "주소", "배송지", "수취인주소", "수령인주소", "수취인 주소", "수령인 주소"]
+    ORDER_CANDS = ["주문번호"]
 
     total_amount = 0.0
     nonzero_people_keys: Set[str] = set()
@@ -157,11 +136,20 @@ def compute_from_sheets(sheets: Dict[str, pd.DataFrame]) -> Tuple[float, Set[str
         buyer_col = find_col(cols, BUYER_CANDS)
         recip_col = find_col(cols, RECIP_CANDS)
         addr_col = find_col(cols, ADDR_CANDS)
+        order_col = find_col(cols, ORDER_CANDS)
 
+        # ---- amount ----
         if amount_col is not None:
-            amt = to_number(df[amount_col])
-            total_amount += float(amt.sum(skipna=True) or 0.0)
+            amt = to_number(df[amount_col]).fillna(0)
 
+            if amount_mode == "order_first" and order_col is not None:
+                tmp = df.copy()
+                tmp["_amt"] = amt
+                total_amount += float(tmp.groupby(order_col)["_amt"].first().sum() or 0.0)
+            else:
+                total_amount += float(amt.sum(skipna=True) or 0.0)
+
+        # ---- shipping keys ----
         if ship_col is not None:
             ship = to_number(df[ship_col]).fillna(0)
             nonzero_mask = ship != 0
@@ -172,7 +160,6 @@ def compute_from_sheets(sheets: Dict[str, pd.DataFrame]) -> Tuple[float, Set[str
 
             keys = (buyer + "||" + recip + "||" + addr)
             keys = keys[nonzero_mask].dropna()
-
             keys = keys[keys.str.replace("||", "", regex=False).str.strip() != ""]
             nonzero_people_keys.update(keys.tolist())
 
@@ -191,91 +178,10 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True,
 )
 
-left, _ = st.columns([1, 2])
-with left:
-    calc_btn = st.button("✅ 계산", use_container_width=True)
+opt1, opt2 = st.columns([1, 1])
 
-if calc_btn:
-    if not uploaded_files:
-        st.warning("먼저 엑셀 파일을 업로드해 주세요.")
-    else:
-        per_file_rows = []
-        grand_amount = 0.0
-        grand_keys_union: Set[str] = set()
-
-        progress = st.progress(0)
-
-        for i, f in enumerate(uploaded_files, start=1):
-            try:
-                sheets = read_excel_sheets(f.getvalue())
-                amount_sum, keyset = compute_from_sheets(sheets)
-
-                unique_count = len(keyset)
-                shipping_calc = unique_count * 3500
-
-                per_file_rows.append({
-                    "파일명": f.name,
-                    "최종 상품별 총 주문금액 합계": amount_sum,
-                    "배송비≠0 (중복제거 인원수)": unique_count,
-                    "인원×3,500 합계": shipping_calc,
-                })
-
-                grand_amount += amount_sum
-                grand_keys_union.update(keyset)
-
-            except Exception as e:
-                per_file_rows.append({
-                    "파일명": f.name,
-                    "최종 상품별 총 주문금액 합계": None,
-                    "배송비≠0 (중복제거 인원수)": None,
-                    "인원×3,500 합계": None,
-                    "오류": str(e),
-                })
-
-            progress.progress(i / len(uploaded_files))
-
-        grand_unique_count = len(grand_keys_union)
-        grand_shipping_calc = grand_unique_count * 3500
-
-        summary_df = pd.DataFrame(per_file_rows)
-
-        st.session_state["result"] = {
-            "summary_df": summary_df,
-            "grand_amount": grand_amount,
-            "grand_unique_count": grand_unique_count,
-            "grand_shipping_calc": grand_shipping_calc,
-        }
-
-if "result" in st.session_state:
-    res = st.session_state["result"]
-    summary_df = res["summary_df"]
-    grand_amount = res["grand_amount"]
-    grand_unique_count = res["grand_unique_count"]
-    grand_shipping_calc = res["grand_shipping_calc"]
-
-    st.subheader("✅ 전체 결과")
-
-    amount_view = f"{grand_amount:,.0f}" if float(grand_amount).is_integer() else f"{grand_amount:,}"
-    shipping_view = f"{grand_shipping_calc:,}"
-
-    m1, m2, m3, m4 = st.columns([1, 1, 1, 1.3])
-
-    m1.metric("최종 상품별 총 주문금액 총합", f"{amount_view} 원")
-    m2.metric("배송비≠0 중복제거 인원수", f"{grand_unique_count:,} 명")
-    m3.metric("인원×3,500 합계", f"{shipping_view} 원")
-
-    with m4:
-        st.caption("📋 엑셀 복사용 (클릭 → Ctrl+C)")
-        st.text_input(
-            "최종 상품별 총 주문금액 총합 (표시용 / 콤마)",
-            value=amount_view,
-            key="copy_total_amount_fmt_only",
-        )
-        st.text_input(
-            "인원×3,500원 합계 (표시용 / 콤마)",
-            value=shipping_view,
-            key="copy_shipping_fmt_only",
-        )
-
-    st.subheader("파일별 상세")
-    st.dataframe(summary_df, use_container_width=True)
+with opt1:
+    # ✅ 디폴트 변경: index=1 -> 파일별 합산이 기본값
+    shipping_dedupe_mode = st.radio(
+        "배송비 인원 계산 방식",
+        ["전체 업로드 파일 통합(중복 제거)", "파]()
