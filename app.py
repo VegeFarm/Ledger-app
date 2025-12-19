@@ -7,6 +7,7 @@ import streamlit as st
 
 PASSWORD = "0000"
 
+
 # ----------------------------
 # Optional dependency (for password-protected Excel)
 # ----------------------------
@@ -44,7 +45,7 @@ def decrypt_excel_bytes(file_bytes: bytes, password: str = PASSWORD) -> io.Bytes
 
 
 def to_number(series: pd.Series) -> pd.Series:
-    # 숫자/문자 섞여 있어도 안전하게 숫자로 변환 (콤마, 원, 공백 제거)
+    # 숫자/문자 섞여 있어도 안전하게 숫자로 변환 (콤마, 원, 공백 등 제거)
     return pd.to_numeric(
         series.astype(str).str.replace(r"[^\d\.-]", "", regex=True),
         errors="coerce",
@@ -60,6 +61,10 @@ def normalize_text_series(series: pd.Series) -> pd.Series:
     )
 
 
+def _norm_no_space(x: str) -> str:
+    return re.sub(r"\s+", "", str(x or "")).strip()
+
+
 def find_col(cols: List[str], candidates: List[str]) -> Optional[str]:
     # 1) exact match
     for c in candidates:
@@ -67,12 +72,9 @@ def find_col(cols: List[str], candidates: List[str]) -> Optional[str]:
             return c
 
     # 2) normalized match (remove spaces/newlines)
-    def norm(x: str) -> str:
-        return re.sub(r"\s+", "", str(x or ""))
-
-    cols_norm = {norm(c): c for c in cols}
+    cols_norm = {_norm_no_space(c): c for c in cols}
     for cand in candidates:
-        n = norm(cand)
+        n = _norm_no_space(cand)
         if n in cols_norm:
             return cols_norm[n]
 
@@ -85,10 +87,29 @@ def find_col(cols: List[str], candidates: List[str]) -> Optional[str]:
     return None
 
 
+def detect_header_row(df: pd.DataFrame, max_scan: int = 30) -> int:
+    """
+    엑셀에 안내문 등이 위에 있을 수 있어서
+    앞쪽 몇 줄 스캔 후 '구매자명/수취인명'이 포함된 줄을 헤더로 판단.
+    (공백/줄바꿈 포함한 변형도 대비)
+    """
+    must_have = {_norm_no_space("구매자명"), _norm_no_space("수취인명")}
+
+    scan_n = min(max_scan, len(df))
+    for r in range(scan_n):
+        row_vals = df.iloc[r].astype(str).tolist()
+        row_norm_set = set(_norm_no_space(v) for v in row_vals if str(v).strip() != "")
+        if must_have.issubset(row_norm_set):
+            return r
+
+    # 못 찾으면 기존처럼 0행을 헤더로 가정
+    return 0
+
+
 def read_excel_sheets(file_bytes: bytes) -> Dict[str, pd.DataFrame]:
     bio = decrypt_excel_bytes(file_bytes, PASSWORD)
 
-    # raw read (no header), then set header from first row
+    # raw read (no header), then set header from detected row
     raw = pd.read_excel(bio, sheet_name=None, header=None, engine="openpyxl")
 
     sheets: Dict[str, pd.DataFrame] = {}
@@ -96,8 +117,8 @@ def read_excel_sheets(file_bytes: bytes) -> Dict[str, pd.DataFrame]:
         if df is None or df.empty:
             continue
 
-        # header row assumed to be first row
-        header = df.iloc[0].astype(str).str.strip().tolist()
+        header_row = detect_header_row(df, max_scan=30)
+        header = df.iloc[header_row].astype(str).str.strip().tolist()
 
         # make header unique (avoid duplicate col names)
         seen = {}
@@ -107,13 +128,10 @@ def read_excel_sheets(file_bytes: bytes) -> Dict[str, pd.DataFrame]:
             if h2.lower() == "nan" or h2 == "":
                 h2 = "col"
             cnt = seen.get(h2, 0)
-            if cnt == 0:
-                new_cols.append(h2)
-            else:
-                new_cols.append(f"{h2}_{cnt}")
+            new_cols.append(h2 if cnt == 0 else f"{h2}_{cnt}")
             seen[h2] = cnt + 1
 
-        data = df.iloc[1:].copy()
+        data = df.iloc[header_row + 1 :].copy()
         data.columns = new_cols
         data = data.dropna(how="all").reset_index(drop=True)
         sheets[name] = data
@@ -126,16 +144,15 @@ def format_plain_number(x: float) -> str:
     if pd.isna(x):
         return ""
     try:
-        if float(x).is_integer():
-            return str(int(round(float(x))))
-        return str(float(x))
+        xf = float(x)
+        if xf.is_integer():
+            return str(int(round(xf)))
+        return str(xf)
     except Exception:
         return str(x)
 
 
-def compute_from_sheets(
-    sheets: Dict[str, pd.DataFrame]
-) -> Tuple[float, Set[str]]:
+def compute_from_sheets(sheets: Dict[str, pd.DataFrame]) -> Tuple[float, Set[str]]:
     """
     Returns:
       (sum_of_final_order_amount, set_of_unique_keys_with_nonzero_shipping)
@@ -258,7 +275,10 @@ if "result" in st.session_state:
 
     st.subheader("✅ 전체 결과")
     m1, m2, m3 = st.columns(3)
-    m1.metric("최종 상품별 총 주문금액 총합", f"{grand_amount:,.0f} 원" if float(grand_amount).is_integer() else f"{grand_amount:,} 원")
+
+    # 보기용(콤마) 표시
+    amount_view = f"{grand_amount:,.0f}" if float(grand_amount).is_integer() else f"{grand_amount:,}"
+    m1.metric("최종 상품별 총 주문금액 총합", f"{amount_view} 원")
     m2.metric("배송비≠0 중복제거 인원수", f"{grand_unique_count:,} 명")
     m3.metric("인원×3,500 합계", f"{grand_shipping_calc:,} 원")
 
@@ -280,7 +300,7 @@ if "result" in st.session_state:
         )
         st.text_input(
             "최종 상품별 총 주문금액 총합 (표시용 / 콤마)",
-            value=f"{grand_amount:,.0f}" if float(grand_amount).is_integer() else f"{grand_amount:,}",
+            value=amount_view,
             key="copy_total_amount_fmt",
         )
 
