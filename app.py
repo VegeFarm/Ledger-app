@@ -91,7 +91,6 @@ def detect_header_row(df: pd.DataFrame, max_scan: int = 30) -> int:
     """
     엑셀에 안내문 등이 위에 있을 수 있어서
     앞쪽 몇 줄 스캔 후 '구매자명/수취인명'이 포함된 줄을 헤더로 판단.
-    (공백/줄바꿈 포함한 변형도 대비)
     """
     must_have = {_norm_no_space("구매자명"), _norm_no_space("수취인명")}
 
@@ -102,14 +101,11 @@ def detect_header_row(df: pd.DataFrame, max_scan: int = 30) -> int:
         if must_have.issubset(row_norm_set):
             return r
 
-    # 못 찾으면 기존처럼 0행을 헤더로 가정
     return 0
 
 
 def read_excel_sheets(file_bytes: bytes) -> Dict[str, pd.DataFrame]:
     bio = decrypt_excel_bytes(file_bytes, PASSWORD)
-
-    # raw read (no header), then set header from detected row
     raw = pd.read_excel(bio, sheet_name=None, header=None, engine="openpyxl")
 
     sheets: Dict[str, pd.DataFrame] = {}
@@ -139,19 +135,6 @@ def read_excel_sheets(file_bytes: bytes) -> Dict[str, pd.DataFrame]:
     return sheets
 
 
-def format_plain_number(x: float) -> str:
-    """엑셀에 붙여넣기 좋은 '콤마 없는 숫자' 문자열 (정수면 .0 제거)"""
-    if pd.isna(x):
-        return ""
-    try:
-        xf = float(x)
-        if xf.is_integer():
-            return str(int(round(xf)))
-        return str(xf)
-    except Exception:
-        return str(x)
-
-
 def compute_from_sheets(sheets: Dict[str, pd.DataFrame]) -> Tuple[float, Set[str]]:
     """
     Returns:
@@ -175,12 +158,10 @@ def compute_from_sheets(sheets: Dict[str, pd.DataFrame]) -> Tuple[float, Set[str
         recip_col = find_col(cols, RECIP_CANDS)
         addr_col = find_col(cols, ADDR_CANDS)
 
-        # 1) amount sum
         if amount_col is not None:
             amt = to_number(df[amount_col])
             total_amount += float(amt.sum(skipna=True) or 0.0)
 
-        # 2) unique people with nonzero shipping
         if ship_col is not None:
             ship = to_number(df[ship_col]).fillna(0)
             nonzero_mask = ship != 0
@@ -192,7 +173,6 @@ def compute_from_sheets(sheets: Dict[str, pd.DataFrame]) -> Tuple[float, Set[str
             keys = (buyer + "||" + recip + "||" + addr)
             keys = keys[nonzero_mask].dropna()
 
-            # 완전 빈 키 제외
             keys = keys[keys.str.replace("||", "", regex=False).str.strip() != ""]
             nonzero_people_keys.update(keys.tolist())
 
@@ -211,7 +191,7 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True,
 )
 
-left, right = st.columns([1, 2])
+left, _ = st.columns([1, 2])
 with left:
     calc_btn = st.button("✅ 계산", use_container_width=True)
 
@@ -274,67 +254,24 @@ if "result" in st.session_state:
     grand_shipping_calc = res["grand_shipping_calc"]
 
     st.subheader("✅ 전체 결과")
-    m1, m2, m3 = st.columns(3)
 
     # 보기용(콤마) 표시
     amount_view = f"{grand_amount:,.0f}" if float(grand_amount).is_integer() else f"{grand_amount:,}"
+
+    # 4칸으로 구성해서, "인원×3,500" 옆(오른쪽)에 복사용 입력칸 배치
+    m1, m2, m3, m4 = st.columns([1, 1, 1, 1.3])
+
     m1.metric("최종 상품별 총 주문금액 총합", f"{amount_view} 원")
     m2.metric("배송비≠0 중복제거 인원수", f"{grand_unique_count:,} 명")
     m3.metric("인원×3,500 합계", f"{grand_shipping_calc:,} 원")
 
-    # ----------------------------
-    # Copy-to-Excel section
-    # ----------------------------
-    st.subheader("📋 엑셀에 붙여넣기(복사용)")
-    st.caption("아래 칸을 클릭 → Ctrl+C → 엑셀에 Ctrl+V")
-
-    amount_plain = format_plain_number(grand_amount)
-    shipping_plain = format_plain_number(grand_shipping_calc)
-
-    c1, c2 = st.columns(2)
-    with c1:
-        st.text_input(
-            "최종 상품별 총 주문금액 총합 (숫자 / 콤마없음)",
-            value=amount_plain,
-            key="copy_total_amount_num",
-        )
+    with m4:
+        st.caption("📋 엑셀 복사용 (클릭 → Ctrl+C)")
         st.text_input(
             "최종 상품별 총 주문금액 총합 (표시용 / 콤마)",
             value=amount_view,
-            key="copy_total_amount_fmt",
+            key="copy_total_amount_fmt_only",
         )
-
-    with c2:
-        st.text_input(
-            "인원×3,500 합계 (숫자 / 콤마없음)",
-            value=shipping_plain,
-            key="copy_shipping_total_num",
-        )
-        st.text_input(
-            "인원×3,500 합계 (표시용 / 콤마)",
-            value=f"{grand_shipping_calc:,}",
-            key="copy_shipping_total_fmt",
-        )
-
-    # 엑셀 붙여넣기용 TSV (탭 구분)
-    tsv_one_line = f"{amount_plain}\t{shipping_plain}"
-    tsv_with_header = (
-        "최종 상품별 총 주문금액 총합\t인원×3,500 합계\n"
-        f"{amount_plain}\t{shipping_plain}"
-    )
-
-    st.text_area(
-        "한 줄(탭 구분) — 엑셀에 붙여넣으면 2칸으로 자동 분리",
-        value=tsv_one_line,
-        height=70,
-        key="copy_tsv_one",
-    )
-    st.text_area(
-        "헤더 포함(2열×2행) — 표 형태로 그대로 붙여넣기",
-        value=tsv_with_header,
-        height=110,
-        key="copy_tsv_header",
-    )
 
     st.subheader("파일별 상세")
     st.dataframe(summary_df, use_container_width=True)
